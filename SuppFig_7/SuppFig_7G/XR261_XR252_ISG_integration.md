@@ -1,10 +1,9 @@
 XR261_XR252_ISG_integration
 ================
 
+## LOAD PACKAGES
+
 ``` r
-#--------------------------------------------------------------------
-# LOAD PACKAGES
-#--------------------------------------------------------------------
 library(readr)
 library(tidyverse)
 ```
@@ -26,10 +25,9 @@ library(ggpubr)
 library(grid)
 ```
 
+## DATA IMPORT AND CLEANUP
+
 ``` r
-#--------------------------------------------------------------------
-# DATA IMPORT AND CLEANUP
-#--------------------------------------------------------------------
 list_of_files <- list.files(path = "../XR261_DESeq2/output",
                             recursive = FALSE,
                             pattern = "DEG.tsv",
@@ -56,10 +54,9 @@ data_fpkm <- data_fpkm %>%
   dplyr::select(matches("^(gene|BMEC)"))
 ```
 
+## EXTRACT SIGNIFICANT GENES AND USE FPKM CUTOFF
+
 ``` r
-#--------------------------------------------------------------------
-# EXTRACT SIGNIFICANT GENES AND USE FPKM CUTOFF
-#--------------------------------------------------------------------
 adj_pval_cutoff = 0.05
 log2FC_cutoff = 1
 FPKM_cutoff = 1
@@ -96,10 +93,9 @@ data_sig <- data_sig %>%
   dplyr::select(matches("^(gene|BMEC)"))
 ```
 
+## GET LIST OF ISGs FROM XR252
+
 ``` r
-#--------------------------------------------------------------------
-# GET LIST OF ISGs FROM XR252
-#--------------------------------------------------------------------
 # get list of ISG names and save to file
 data_ISG <- read.delim("input/XR252_ISG_expression_BMEC.tsv")
 data_ISG <- data_ISG %>%
@@ -138,10 +134,9 @@ ISG_set_expression_df <- data.frame(
   write_tsv("output/XR261_ISG_set_expression.tsv")
 ```
 
+## PLOT SUMMARY DATA as BARPLOTS
+
 ``` r
-#--------------------------------------------------------------------
-# PLOT SUMMARY DATA as BARPLOTS
-#--------------------------------------------------------------------
 # define metadata/groups
 metadata <- data.frame(
   sample_id = colnames(ISG_fpkm),
@@ -187,16 +182,15 @@ ggplot(plot_data, aes(x = condition, y = score, fill = condition)) +
   theme(aspect.ratio = 1)
 ```
 
-![](XR261_XR252_ISG_integration_files/figure-gfm/unnamed-chunk-6-1.png)<!-- -->
+![](XR261_XR252_ISG_integration_files/figure-gfm/plot%20summary%20data%20as%20barplots-1.png)<!-- -->
 
 ``` r
 ggsave("output/XR261_ISG_set_expression.pdf", width = 10, height = 10, units = "in", dpi = 300)
 ```
 
+## CURATE DATA JOIN DATASETS INDUCED BY POLYIC AND IFNA KEEP ALL THAT ARE UP BY POLYIC
+
 ``` r
-#--------------------------------------------------------------------
-# CURATE DATA JOIN DATASETS INDUCED BY POLYIC AND IFNA KEEP ALL THAT ARE UP BY POLYIC
-#--------------------------------------------------------------------
 # merge PIC induced genes with IFNa induced genes but keep all from PIC
 data_all_IFNa <- read.delim("../../XR252_BMEC_IFN_RNAseq/XR252_RNAseq_analyses_AL/XR252_DESeq2/output/XR252_FPKM.tsv")
 data_all_IFNa <- data_all_IFNa %>%
@@ -217,10 +211,9 @@ rownames(data_fpkm) <- data_fpkm$gene_id
 data_fpkm$gene_id = NULL
 ```
 
+## PLOT HEATMAP OF INDIVIDUAL VALUES GENES UP BY POLYIC
+
 ``` r
-#--------------------------------------------------------------------
-# PLOT HEATMAP OF INDIVIDUAL VALUES GENES UP BY POLYIC
-#--------------------------------------------------------------------
 # define formula to calculate row Z score
 cal_z_score <- function(x){
   (x - mean(x)) / sd(x)
@@ -261,7 +254,7 @@ p <- pheatmap(data_fpkm_norm, annotation_col = my_sample_col, annotation_row = m
               cutree_rows = numberofclusters)
 ```
 
-![](XR261_XR252_ISG_integration_files/figure-gfm/unnamed-chunk-8-1.png)<!-- -->
+![](XR261_XR252_ISG_integration_files/figure-gfm/plot%20heatmap%20of%20individual%20values%20genes%20up%20by%20polyIC-1.png)<!-- -->
 
 ``` r
 grid::grid.newpage()
@@ -283,10 +276,9 @@ data_save <- data_fpkm %>%
 write_tsv(data_save, "output/XR261_ISG_heatmap_individual.tsv")
 ```
 
+## PLOT HEATMAP OF MEAN VALUES GENES UP BY POLYIC
+
 ``` r
-#--------------------------------------------------------------------
-# PLOT HEATMAP OF MEAN VALUES GENES UP BY POLYIC
-#--------------------------------------------------------------------
 # add means for all conditions
 data_fpkm_mean <- data_fpkm %>%
   mutate(
@@ -335,7 +327,7 @@ p <- pheatmap(data_fpkm_mean_norm, annotation_col = my_sample_col, annotation_ro
          cutree_rows = numberofclusters)
 ```
 
-![](XR261_XR252_ISG_integration_files/figure-gfm/unnamed-chunk-9-1.png)<!-- -->
+![](XR261_XR252_ISG_integration_files/figure-gfm/plot%20heatmap%20of%20mean%20values%20genes%20up%20by%20polyIC-1.png)<!-- -->
 
 ``` r
 grid::grid.newpage()
@@ -357,10 +349,9 @@ data_save <- data_fpkm %>%
 write_tsv(data_save, "output/XR261_ISG_heatmap_means.tsv")   
 ```
 
+## APPENDIX
+
 ``` r
-#--------------------------------------------------------------------
-# APPENDIX
-#--------------------------------------------------------------------
 # which R packages and versions?
 if ("devtools" %in% installed.packages()) devtools::session_info()
 ```
