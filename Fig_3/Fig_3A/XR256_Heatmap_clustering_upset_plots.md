@@ -1,4 +1,4 @@
-XR256_upset_plots
+XR256_Heatmap_clustering_Upset_plot
 ================
 Alexander Lercher
 2026-04-29
@@ -148,7 +148,7 @@ fpkm_only %>%
     theme_bw()
 ```
 
-![](XR256_DEG_analyses_files/figure-gfm/FPKM%20filter-1.png)<!-- -->
+![](XR256_Heatmap_clustering_upset_plots_files/figure-gfm/FPKM%20filter-1.png)<!-- -->
 
 ``` r
 # filter according to FPKM cutoff
@@ -164,7 +164,7 @@ fpkm_only %>%
   theme_bw()
 ```
 
-![](XR256_DEG_analyses_files/figure-gfm/FPKM%20filter-2.png)<!-- -->
+![](XR256_Heatmap_clustering_upset_plots_files/figure-gfm/FPKM%20filter-2.png)<!-- -->
 
 ``` r
 # drop average FPKM column
@@ -350,7 +350,7 @@ pheatmap::pheatmap(fpkmOI_norm, annotation_col = my_sample_col, annotation_row =
            cutree_rows = numberofclusters)
 ```
 
-![](XR256_DEG_analyses_files/figure-gfm/cluster%20genes%20significant%20in%20at%20least%20one%20condition-1.png)<!-- -->
+![](XR256_Heatmap_clustering_upset_plots_files/figure-gfm/cluster%20genes%20significant%20in%20at%20least%20one%20condition-1.png)<!-- -->
 
 ``` r
 # add cluster and ISG information to DEG list
@@ -421,7 +421,7 @@ p <- ComplexUpset::upset(
 print(p)
 ```
 
-![](XR256_DEG_analyses_files/figure-gfm/generate%20upset%20plots-1.png)<!-- -->
+![](XR256_Heatmap_clustering_upset_plots_files/figure-gfm/generate%20upset%20plots-1.png)<!-- -->
 
 ## APPENDIX
 

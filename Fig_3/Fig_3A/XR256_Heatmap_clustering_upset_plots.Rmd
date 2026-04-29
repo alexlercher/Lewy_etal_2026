@@ -1,5 +1,5 @@
 ---
-title: "XR256_upset_plots"
+title: "XR256_Heatmap_clustering_Upset_plot"
 author: "Alexander Lercher"
 date: "`r Sys.Date()`"
 output: github_document
