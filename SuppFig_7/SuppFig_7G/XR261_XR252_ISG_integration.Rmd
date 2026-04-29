@@ -1,5 +1,7 @@
 ---
 title: "XR261_XR252_ISG_integration"
+author: "Alexander Lercher"
+date: "`r Sys.Date()`"
 output: github_document
 ---
 

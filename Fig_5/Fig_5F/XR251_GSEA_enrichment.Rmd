@@ -1,0 +1,158 @@
+---
+title: "XR251_GSEA_Enrichment"
+author: "Alexander Lercher"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+## LOAD PACKAGES
+```{r load packages}
+library(tidyverse)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(dplyr)
+library(ggplot2)
+library(viridis)
+```
+
+## LOAD in DEG files
+```{r load DEG files}
+list_of_files <- list.files(
+  path = "output/DEG",
+  pattern = "\\.tsv$",
+  full.names = TRUE
+)
+
+# read in files and put them in a list
+data_list <- lapply(list_of_files, read_tsv)
+
+# put them into one big dataframe
+data <- bind_rows(data_list)
+```
+
+## EXTRACT SIGNIFICANT GENES IN CELL TYPE AND COMPARISON OF INTEREST
+```{r extract significant genes}
+# set significance criteria
+pval_cutoff <- 0.05
+log2_cutoff <- 0.5
+
+# genes significant in condition of interest and cluster of interest
+sig_COI <- data %>%
+  dplyr::filter(
+    p_val_adj < pval_cutoff,
+    abs(avg_log2FC) >= log2_cutoff
+  )
+```
+
+## ENRICHMENT ANALYSES
+```{r enrichment analyses}
+# extract clusters and comparisons
+cluster_name <- unique(data$cluster)
+comparison_name <- unique(data$comparison)
+
+# loop over each comparison and within it each cluster to get DEGs
+# only interested in 16h vs 0h
+i <- 2
+#for(i in 1:length(comparison_name)){
+  genes_of_interest <- sig_COI %>%
+    dplyr::filter(comparison == comparison_name[[i]])
+
+# only interested in microglia
+y <- 8
+  #for(y in 1:length(cluster_name)){
+    genes_of_interest_per_cluster <- genes_of_interest %>%
+      dplyr::filter(cluster == cluster_name[[y]])
+```
+
+## GSEA / gseGO enrichment
+```{r GSEA gseGO enrichment}
+gse <- tryCatch(
+  {
+    # create ranked gene vector
+    gene_list <- genes_of_interest_per_cluster %>%
+      dplyr::mutate(logFC_signed = avg_log2FC * -log10(p_val_adj + 1e-10)) %>%
+      dplyr::arrange(desc(logFC_signed)) %>%
+      dplyr::select(gene, logFC_signed)
+    
+    gene_list_vect <- gene_list$logFC_signed
+    names(gene_list_vect) <- gene_list$gene
+    
+    # run gseGO
+    gseGO(
+      geneList     = gene_list_vect,
+      OrgDb        = org.Mm.eg.db,
+      ont          = "BP",
+      keyType      = "SYMBOL",
+      minGSSize    = 10,
+      maxGSSize    = 500,
+      pvalueCutoff = 0.05,
+      nPermSimple  = 10000,
+      verbose      = FALSE
+    )
+  },
+  error = function(e) NULL
+)
+
+if(is.null(gse)){
+  message("GSEA returned NULL for cluster ", cluster_name[[y]], " | comparison ", comparison_name[[i]])
+} else if(nrow(as.data.frame(gse)) == 0){
+  message("No enriched GO BP terms found for cluster ", cluster_name[[y]], " | comparison ", comparison_name[[i]])
+} else {
+  
+  # save full GSEA table
+  gse %>%
+    as.data.frame() %>%
+    dplyr::filter(!is.na(p.adjust)) %>%
+    arrange(desc(NES)) %>%
+    write_tsv(
+      file = paste0(
+        "output/GSEA_enrichments/",
+        comparison_name[[i]], "/",
+        cluster_name[[y]], "_GSEA.tsv"
+    )
+  )
+  
+  # simplify GO terms
+  gse_simpl <- simplify(gse, cutoff = 0.7, by = "p.adjust", select_fun = min)
+  gse_df <- as.data.frame(gse_simpl) %>% filter(!is.na(p.adjust))
+  
+  #---------------------------------------------
+  # Positive NES (top 10)
+  #---------------------------------------------
+  top_pos <- gse_df %>%
+    filter(NES > 0) %>%
+    slice_max(NES, n = 10, with_ties = FALSE) %>%
+    mutate(Description = forcats::fct_reorder(Description, NES))
+  
+  if(nrow(top_pos) > 0){
+    p_pos <- ggplot(top_pos, aes(x = NES, y = Description)) +
+      geom_point(aes(size = setSize, color = p.adjust)) +
+      scale_size_continuous(range = c(8,20)) +
+      scale_color_viridis_c(option = "viridis", direction = 1, name = "Adjusted p-value") +
+      theme_bw() +
+      theme(
+        aspect.ratio = 1,
+        plot.margin = margin(t = 20, r = 10, b = 10, l = 10)
+      ) +
+      labs(
+        title = paste0("Top 10 positively enriched GO BP terms: ", cluster_name[[y]], " | ", comparison_name[[i]]),
+        x = "NES (upregulated)", y = ""
+      )
+    
+    print(p_pos)
+  }
+  
+  }
+
+print(paste0(cluster_name[[y]]," done!"," We are in comparison ",comparison_name[[i]],". ",length(cluster_name)-y," of ",length(cluster_name),
+             " clusters in this comparison to go. ",length(comparison_name)-i," comparisons to go in total."))
+#  }
+#}
+```
+
+## APPENDIX
+```{r appendix}
+# which R packages and versions?
+if ("devtools" %in% installed.packages()) devtools::session_info()
+```
+

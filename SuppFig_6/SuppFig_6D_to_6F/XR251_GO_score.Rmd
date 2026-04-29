@@ -1,0 +1,235 @@
+---
+title: "XR251_GO_score"
+author: "Alexander Lercher"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+## LOAD PACKAGES
+```{r load packages}
+library(GO.db)
+library(org.Mm.eg.db)
+library(AnnotationDbi)
+library(Seurat)
+library(tidyverse)
+library(patchwork)
+library(ComplexHeatmap)
+library(circlize)
+library(scales)
+```
+
+## LOAD in SEURAT RDS file modified by me
+```{r load seurat RDS}
+data <- readRDS(file = "input/seu_obj_v12192025_AL.rds")
+```
+
+## GET GENES FOR GO of INTEREST
+```{r get genes for GO of interest}
+go_id <- c("GO:0006955","GO:0006954","GO:0034340")
+
+# Get Entrez IDs for the GO term
+go_list <- list()
+for(i in 1:length(go_id)){
+  genes <- AnnotationDbi::select(
+    org.Mm.eg.db,
+    keys = go_id[i],
+    keytype = "GOALL",               # include all evidence codes
+    columns = c("ENTREZID", "SYMBOL")
+  )
+  # remove duplicates
+  genes <- genes %>% distinct(ENTREZID, SYMBOL)
+  # keep unique symbols, remove NA
+  genes_symbol <- na.omit(unique(genes$SYMBOL))
+  go_list[[i]] <- genes_symbol
+
+go_term <- Term(GOTERM[[go_id[i]]])
+go_term <- gsub(" ", "_", go_term)
+
+names(go_list)[i] <- paste0(go_id[i],"_",go_term)
+
+print(paste0(go_id[[i]],": ",gsub("_"," ",go_term)," done! ",length(go_id)-i," GO terms of ",length(go_id)," to go!"))
+}
+```
+
+## ADD MODULE SCORES
+```{r add module scores}
+for(i in 1:length(go_list)){
+  data <- AddModuleScore(
+    object = data,
+    features = list(go_list[[i]]),
+    name = paste0(names(go_list[i]),"_score")
+  )
+  print(paste0(i," module scores done, ",length(go_id)-i," to go!"))
+}
+```
+
+## PLOT MODULE SCORES
+```{r plot module scores}
+for(i in 1:length(go_list)){
+  colname <- paste0(names(go_list[i]), "_score1")
+  # sanitize GO name
+  go_name <- gsub(":", "_", names(go_list)[i])
+  # make output directory
+  go_dir <- file.path("output", "GO_score", go_name)
+  
+  if (!dir.exists(go_dir)) {
+    dir.create(go_dir, recursive = TRUE)
+  }
+  
+  # VIOLIN PLOT
+  # get expression values
+  df <- data@meta.data %>%
+    dplyr::select(cell_type, condition, all_of(colname))
+  
+  # plot
+  p <- ggplot(df, aes(x = condition, y = .data[[colname]], fill = condition)) +
+        geom_violin() +
+        facet_wrap(~cell_type, ncol = 3, scales = "fixed") +  # 3 panels per row
+        scale_fill_manual(values = c("00_hours"="#E69F00", "02_hours"="#56B4E9", "16_hours"="#009E73")) +
+        theme_bw() +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1),
+              aspect.ratio = 1) +
+        ylab("go_list Module Score (log1p)") +
+        xlab("Time Point") +
+        scale_y_continuous(trans="log1p")
+  print(p)
+  
+  # DOT PLOT
+  # calculate percent expressing and avg score
+  df_summary <- data@meta.data %>%
+    dplyr::select(cell_type, condition, all_of(colname)) %>%
+    group_by(cell_type, condition) %>%
+    summarize(
+      avg_score = mean(.data[[colname]]),
+      pct_expressing = mean(.data[[colname]] > 0) * 100,  # fraction of cells with positive score
+      .groups = "drop"
+    ) %>%
+    group_by(cell_type) %>%
+    mutate(avg_score_total = mean(avg_score)) %>%
+    ungroup()
+  
+  # order by highest expressing cell type
+  df_summary$cell_type <- factor(df_summary$cell_type,
+                                 levels = df_summary %>%
+                                   distinct(cell_type, avg_score_total) %>%
+                                   arrange(avg_score_total) %>%
+                                   pull(cell_type))
+  
+  # save table to file
+  df_summary_save <- df_summary %>%
+    dplyr::select(!avg_score_total) %>%
+    write_tsv(paste0(go_dir,"/",go_name,"_module_scores.tsv"))
+  
+  # plot
+  p <- ggplot(df_summary, aes(x = condition, y = cell_type)) +
+        geom_point(aes(size = pct_expressing, color = avg_score)) +
+        scale_color_gradient(low = "lightgrey", high = "firebrick") +
+        scale_size(range = c(1, 5)) +  # adjust point size range
+        theme_bw() +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+        xlab("Time Point") +
+        ylab("Cell Type") +
+        ggtitle("GO Module Score")
+  print(p)
+  
+  # HEATMAP
+  # get matrix of module set expression
+  mat_avg <- df_summary %>%
+    dplyr::select(condition, cell_type, avg_score) %>%
+    tidyr::pivot_wider(
+      names_from = cell_type,
+      values_from = avg_score
+    ) %>%
+    tibble::column_to_rownames("condition") %>%
+    as.matrix()
+  
+  # get annotation dataframe of average pct_expressing across all time points
+  pct_df <- df_summary %>%
+    mutate(cell_type = as.character(cell_type)) %>%
+    group_by(cell_type) %>%
+    summarise(pct_expressing = mean(pct_expressing), .groups = "drop") %>%
+    tibble::column_to_rownames("cell_type")
+  
+  # enforce exact column order
+  pct_df <- pct_df[colnames(mat_avg), , drop = FALSE]
+  
+  # safety check
+  stopifnot(!any(is.na(pct_df$pct_expressing)))
+  
+  # define annotation (prepare to plot)
+  ha <- HeatmapAnnotation(
+    df = pct_df,
+    col = list(
+      pct_expressing = colorRamp2(
+        c(0,100),
+        c("#f7fcf5", "#238b45")
+      )
+    ),
+    show_annotation_name = FALSE
+  )
+  
+  # define color scale for module scores
+  # min and max are clear but need to fraction range of measurement to get low and middle numbers
+  low_signal <- (abs(max(mat_avg) - min(mat_avg)))/9.5 + min(mat_avg)
+  middle_signal <- (abs(max(mat_avg) - min(mat_avg)))/6 + min(mat_avg)
+  
+  # define color range
+  col_scale <- colorRamp2(
+    c(min(mat_avg, na.rm= TRUE), low_signal, middle_signal, max(mat_avg, na.rm = TRUE)),
+    c("#8c6bb1", "#cce6ff", "#fff5b1", "#fb8072")
+  )
+  
+  # plot and save heatmap
+  ht <- ComplexHeatmap:: Heatmap(
+    mat_avg,
+    name = paste0(gsub("_"," ",go_name)," module score"),
+    col = col_scale,
+    top_annotation = ha,
+    cluster_rows = FALSE,
+    cluster_columns = TRUE,
+    row_names_gp = gpar(fontsize = 10),
+    column_names_gp = gpar(fontsize = 9),
+    show_row_dend = FALSE,
+    show_column_dend = TRUE,
+    heatmap_legend_param = list(title = "Module score")
+  )
+  
+  draw(ht, heatmap_legend_side = "right", annotation_legend_side = "right")
+  
+  # UMAP per TIME POINT
+  # compute global min/max for feature
+  global_vals <-  data@meta.data[[colname]]
+  min_val <- min(global_vals, na.rm = TRUE)
+  max_val <- max(global_vals, na.rm = TRUE)
+  middle_val <- 0.2
+  
+  # split data by time points
+  objs <- SplitObject(data, split.by = "condition")
+  
+  p_list <- lapply(names(objs), function(nm) {
+    FeaturePlot(
+      objs[[nm]],
+      features = colname,
+      reduction = "umap",
+      order = TRUE,
+      pt.size = 1
+    ) +
+      scale_color_viridis_c(option = "viridis",
+                            limits = c(min_val, max_val),
+                            values= rescale(c(min_val,middle_val, max_val))) +
+      ggtitle(nm) +
+      theme(aspect.ratio = 1)
+  })
+  p_combined <- wrap_plots(p_list, ncol =3)
+  print(p_combined)
+
+print(paste0(gsub("_"," ",go_name)," done! ",as.character(length(go_id)-i)," of ",length(go_id)," remaining"))
+}
+```
+
+## APPENDIX
+```{r appendix}
+# which R packages and versions?
+if ("devtools" %in% installed.packages()) devtools::session_info()
+```
+
