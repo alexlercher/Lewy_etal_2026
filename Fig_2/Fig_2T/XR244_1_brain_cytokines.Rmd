@@ -1,0 +1,140 @@
+---
+title: "XR244_1_brain_cytokines"
+author: "Alexander Lercher"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+## LOAD PACKAGES
+```{r load packages}
+library(readr)
+library(tidyverse)
+library(dplyr)
+library(pheatmap)
+library(grid)
+```
+
+## DATA IMPORT
+```{r data import}
+# import
+experiment <- c("XR244_1")
+data <- read_csv(paste0("input/",experiment,"_brain_data_formatted.csv"))
+
+# define cytokines as row names
+data <- data %>%
+  column_to_rownames(var = "Cytokine")
+```
+
+## SELECT SIGNIFICANT CONDITIONS
+```{r extract significant genes and use FPKM cutoff}
+# filter for samples that are significant in at least one comparison
+# add TRUE/FALSE columns for significance
+# if sum of all TRUE/FALSE columns is >1, keep row
+data_sig <- data %>%
+  mutate(sig_pic_pbs = if_else(pval_PBS_PIC < 0.05,T,F),
+         sig_pic_nai = if_else(pval_PIC_NAI < 0.05,T,F),
+         sig_pbs_nai = if_else(pval_PBS_NAI < 0.05,T,F)) %>%
+  mutate_at(vars(sig_pic_pbs,
+                 sig_pic_nai,
+                 sig_pbs_nai), ~replace_na(.,0)) %>%
+  mutate(sum_pval = rowSums(select(., starts_with("sig_")))) %>%
+  filter(sum_pval > 0) %>%
+  select(!sum_pval)
+```
+
+## PLOT HEATMAP with ROW Z SCORES
+```{r plot heatmap with row z scores}
+# define formula to calculate row Z score
+cal_z_score <- function(x){
+  (x - mean(x)) / sd(x)
+}
+# select individual values (all replicates) to plot
+data_sig_values_only <- data_sig[1:13]
+
+# select mean values (per condition) to plot
+data_sig_values_only_mean <- data_sig[14:16]
+
+# combine in list
+data_sig_list <- list("individual values" = data_sig_values_only, 
+                          "means" = data_sig_values_only_mean)
+
+# calculate row Z score for each row
+data_norm <- list()
+for(i in 1:length(data_sig_list)){
+  n <- t(apply(data_sig_list[[i]], 1, cal_z_score))
+  data_norm[[names(data_sig_list)[[i]]]] <- n
+}
+
+# annotate sample columns for individual samples
+my_sample_col_individual <- data.frame(sample = c(rep("pbs_wnv",5),
+                                       rep("pic_wnv",5),
+                                       rep("nai",3)
+                                       ))
+row.names(my_sample_col_individual) <- colnames(data_sig_values_only)
+
+# annotate sample columns for means
+my_sample_col_mean <- data.frame(sample = c("pbs_wnv",
+                                            "pic_wnv",
+                                            "nai")
+)
+row.names(my_sample_col_mean) <- colnames(data_sig_values_only_mean)
+
+my_sample_col <- list("individual values" = my_sample_col_individual,
+                      "means" = my_sample_col_mean)
+
+# calculate dendrogram
+hc <- lapply(X = data_norm, FUN = function(x){
+  hclust(dist(x), method = "complete")
+})
+
+# add cluster information to heatmap
+numberofclusters = 5
+my_cytokine_col <- list()
+for(i in 1:length(hc)){
+  a <- cutree(hc[[i]], k = numberofclusters)
+  b <- data.frame(cluster = ifelse(test = a == 1, yes = "1",
+                                   ifelse(test = a == 2, yes = "2",
+                                          ifelse(test = a == 3, yes = "3",
+                                                ifelse(test = a == 4, yes = "4", no = "5")))))
+  my_cytokine_col[[names(hc)[[i]]]] <- b
+}
+
+# add column cytokine to dataframes
+for(i in 1:length(my_cytokine_col)){
+  my_cytokine_col[[i]]$cytokine <- rownames(my_cytokine_col[[i]])
+}
+
+# info about significant p-value and condition to heatmap annotation
+data_sig_info <- data_sig %>%
+  select(sig_pic_pbs,
+         sig_pic_nai,
+         sig_pbs_nai)
+data_sig_info$cytokine <- rownames(data_sig_info)
+
+# merge information about significance to cluster
+for(i in 1:length(my_cytokine_col)){
+  my_cytokine_col[[i]] <- left_join(my_cytokine_col[[i]],data_sig_info)
+  my_cytokine_col[[i]]$sig_pic_pbs <- as.integer(my_cytokine_col[[i]]$sig_pic_pbs)
+  my_cytokine_col[[i]]$sig_pic_nai <- as.integer(my_cytokine_col[[i]]$sig_pic_nai)
+  my_cytokine_col[[i]]$sig_pbs_nai <- as.integer(my_cytokine_col[[i]]$sig_pbs_nai)
+  rownames(my_cytokine_col[[i]]) <- my_cytokine_col[[i]]$cytokine
+  my_cytokine_col[[i]]$cytokine <- NULL
+}
+
+# generate and save heatmap
+for(i in 1:length(data_norm)){
+  p <- pheatmap::pheatmap(data_norm[[i]], annotation_col = my_sample_col[[i]], annotation_row = my_cytokine_col[[i]],
+           show_rownames = T, main = paste0(experiment," - ","cytokine profile of ",names(data_norm[i])),
+           #color = colorRampPalette(c("midnightblue", "ivory", "firebrick3"))(50),
+           cutree_rows = numberofclusters)
+grid::grid.newpage()
+grid::grid.draw(p$gtable)
+}
+```
+
+## APPENDIX
+```{r appendix}
+# which R packages and versions?
+if ("devtools" %in% installed.packages()) devtools::session_info()
+```
+

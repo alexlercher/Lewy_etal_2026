@@ -1,0 +1,148 @@
+---
+title: "XR251_TF_enrichment"
+author: "Alexander Lercher"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+## LOAD PACKAGES
+```{r load packages}
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(dorothea)
+library(viper)
+library(decoupleR)
+library(DESeq2)
+library(pheatmap)
+library(Seurat)
+```
+
+## LOAD in SEURAT RDS file modified by me
+```{r load in seurat RDS file modified by me}
+data <- readRDS(file = "input/seu_obj_v12192025_AL.rds")
+```
+
+## EXTRACT PSEUDOBULK DATA
+```{r extract pseudobulk data}
+pseudobulk <- AggregateExpression(
+  data,
+  group.by = c("cell_type","condition"),
+  assays = "RNA",
+  slot = "counts"
+)$RNA
+```
+
+## CREATE METADATA
+```{r create metadata}
+# get list of ISG names and save to file
+meta <- data.frame(
+  sample = colnames(pseudobulk)
+)
+meta$celltype <- sub("_.*", "", meta$sample)
+meta$sample_id <- sub(".*_", "", meta$sample)
+
+meta$condition <- ifelse(meta$sample_id == c("00-hours"),
+                         "control", "treated")
+rownames(meta) <- meta$sample
+
+# safety net
+stopifnot(all(colnames(pseudobulk) == rownames(meta)))
+stopifnot(is.data.frame(meta))
+stopifnot("condition" %in% colnames(meta))
+```
+
+## RUN DESEQ2
+```{r run deseq2}
+dds <- DESeqDataSetFromMatrix(
+  countData = pseudobulk,
+  colData = meta,
+  design = ~condition
+)
+vsd <- vst(dds, blind = FALSE)
+expr_matrix <- assay(vsd)
+```
+
+## RUN TF ACTIVITY ENRICHMENT
+```{r run TF activity enrichment}
+# get TF networks
+data("dorothea_mm")
+regulon <- dorothea_mm %>%
+  filter(confidence %in% c("A","B","C"))
+
+# run viper
+tf_activities <- run_viper(
+  mat = expr_matrix,
+  network = regulon,
+  .source = "tf",
+  .target = "target",
+  .mor = "mor",
+  minsize = 5
+)
+
+# change dashes to underscores
+tf_activities <- tf_activities %>%
+  dplyr::mutate(
+    condition = gsub("-","_", condition),
+    condition = gsub(" ","_", condition)
+  )
+
+# make wide table and write to file
+tf_activities_wide <- tf_activities %>%
+  dplyr::select(source, condition, score) %>%
+  pivot_wider(names_from = condition, values_from = score) %>%
+  column_to_rownames("source") %>%
+  rownames_to_column(var = "TF") %>%
+  write_tsv("output/TF_activities/XR251_TF_activity_enrichment_per_sample.tsv")
+
+# add cell type and time info to activities table
+tf_activities$celltype <- sub("_(\\d+)_hours$", "", tf_activities$condition)
+tf_activities$time <- stringr::str_extract(tf_activities$condition, "\\d+_hours")
+
+# extract all cell type names and time points
+all_celltypes <- unique(tf_activities$celltype)
+all_timepoints <- unique(tf_activities$time)
+
+# subset by cell type of interest
+for(i in 1:length(all_celltypes)) {
+tf_activities_OI <- tf_activities%>%
+  dplyr::filter(celltype == all_celltypes[[i]])
+
+# make wide table
+tf_matrix_OI <- tf_activities_OI %>%
+  dplyr::select(source, time, score) %>%
+  pivot_wider(names_from = time, values_from = score) %>%
+  column_to_rownames("source")
+
+# identify most variable TFs
+tf_sd <- apply(tf_matrix_OI, 1, sd, na.rm = TRUE)
+
+# get most variable TFs
+number_of_tfs <- 50
+top_tfs <- names(sort(tf_sd, decreasing = TRUE))[1:number_of_tfs]
+
+# subset the matrix
+tf_matrix_top <- tf_matrix_OI[top_tfs, ]
+
+# plot heatmap and save to file
+my_palette <- colorRampPalette(c("#6BAED6", "#FDFDFD", "#FB6A4A"))(50)
+p <- pheatmap::pheatmap(
+      tf_matrix_top,
+      cluster_rows = TRUE,
+      cluster_cols = FALSE,
+      scale = "row",
+      color = my_palette,
+      height = 12,
+      width = 8,
+      main = paste0("Top ",as.character(number_of_tfs)," variable TFs in ",gsub("_"," ",all_celltypes[i])," (row z norm)"))
+grid::grid.newpage()
+grid::grid.draw(p$gtable)
+}
+```
+
+## APPENDIX
+```{r appendix}
+# which R packages and versions?
+if ("devtools" %in% installed.packages()) devtools::session_info()
+```
+

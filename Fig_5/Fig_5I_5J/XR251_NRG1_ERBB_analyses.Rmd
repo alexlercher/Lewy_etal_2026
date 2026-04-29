@@ -1,0 +1,91 @@
+---
+title: "XR251_NRG1_ERBB_analyses"
+author: "Alexander Lercher"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+## LOAD PACKAGES
+```{r load packages}
+library(Seurat)
+library(tidyverse)
+library(pheatmap)
+library(circlize)
+library(scales)
+library(ggplot2)
+library(grid)
+```
+
+## LOAD in SEURAT RDS file modified by me
+```{r load seurat RDS}
+data_seu <- readRDS(file = "input/seu_obj_v12192025_AL.rds")
+```
+
+## LOAD TF ENRICHMENT DATA
+```{r load TF enrichment data}
+data_tf <- read_tsv("output/TF_activities/XR251_TF_activity_enrichment_per_sample.tsv")
+```
+
+## PLOT and SAVE HEATMAP OF TFs and CELLS of interest
+```{r plot and save heatmap of TFs and cells of interest}
+# filter for neurons and TFs
+neurons <- c("Excitatory_neurons","Inhibitory_neurons","Interneurons")
+TFs <- c("Elk1","Stat3","Stat5a","Stat5b","Creb1")
+
+for(i in 1:length(neurons)){
+data_tf_filtered <- data_tf %>%
+  dplyr::filter(TF %in% TFs) %>%
+  dplyr::select(TF,
+                starts_with(neurons[i])
+  )
+
+data_tf_filtered_matrix <- data_tf_filtered %>%
+  column_to_rownames("TF") %>%
+  as.matrix()
+
+# plot heatmap and save to file
+my_palette <- colorRampPalette(c("#759CA1", "#FDFDFD", "#DEA07E"))(50)
+p <- pheatmap::pheatmap(
+    data_tf_filtered_matrix,
+    cluster_rows = FALSE,
+    cluster_cols = FALSE,
+    scale = "row",
+    color = my_palette,
+    height = 5,
+    width = 3,
+    main = paste0("ErbB downstream TFs in ",gsub("_"," ",neurons[i])),
+    fontsize = 6)
+grid::grid.newpage()
+grid::grid.draw(p$gtable)
+}
+```
+
+## PLOT and SAVE DOTPLOT OF LIGANDS of interest in MICROGLIA
+```{r plot and save dotplot of ligands of interest in microglia}
+ligands <- c("Nrg1","Nrg2","Nrg3","Nrg4")
+
+subset_data_seu <- subset(data_seu, idents = "Microglia")
+
+p <- DotPlot(subset_data_seu, features = ligands, group.by = "condition") +
+    scale_size(
+      range = c(4, 20),
+      breaks = c(1, 5, 10, 25, 50, 75),
+      limits = c(0, 100)) +
+    scale_color_gradient(low = "lightgrey", high = "firebrick") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          plot.title = element_text(size =12),
+          legend.title = element_text(size = 10),
+          legend.text = element_text(size = 8),
+          aspect.ratio = 1) +
+    ggtitle(paste0("Nrg ligand expression in Microglia")) +
+    coord_flip()
+  
+print(p)
+```
+
+## APPENDIX
+```{r appendix}
+# which R packages and versions?
+if ("devtools" %in% installed.packages()) devtools::session_info()
+```
+

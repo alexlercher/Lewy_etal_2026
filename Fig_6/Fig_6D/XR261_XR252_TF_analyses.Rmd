@@ -1,0 +1,178 @@
+---
+title: "XR261_XR252_TF_analyses"
+author: "Alexander Lercher"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+## LOAD PACKAGES
+```{r load packages}
+library(dorothea)
+library(viper)
+library(decoupleR)
+library(DESeq2)
+library(tidyverse)
+library(limma)
+library(ggplot2)
+library(ggrepel)
+library(pheatmap)
+library(grid)
+```
+
+## XR261 DATA - BMEC: polyIC vs ctrl
+```{r XR261 data - BMEC: polyIC vs ctrl}
+#--------------------------------------------------------------------
+# LOAD CLUSTERING RESULTS FILTER for CLUSTER OF INTEREST
+#--------------------------------------------------------------------
+clusterOI = 1
+data <- readr::read_tsv("output/XR261_ISG_heatmap_individual.tsv")
+genesOI <- data %>%
+  dplyr::filter(cluster == clusterOI) %>%
+  dplyr::select(gene_id)
+
+#--------------------------------------------------------------------
+# DESeq2 OBJECT IMPORT, FILTER SAMPLES and get EXPRESSION MATRIX of GENES OI
+#--------------------------------------------------------------------
+# load DESeq2 object
+dds <- readRDS("../XR261_DESeq2/output/XR261_dds_processed.rds")
+
+
+# extract sample metadata
+coldata <- as.data.frame(colData(dds))
+coldata$condition <- factor(coldata$condition)
+
+# define samples of interest
+samplesOI <- coldata %>%
+  dplyr::filter(condition %in% c("BMEC")) %>%
+  rownames()
+
+# subset DESeq2 object
+ddsOI <- dds[, samplesOI]
+
+# extract sample metadata of interest
+coldataOI <- as.data.frame(colData(ddsOI))
+coldataOI$condition <- factor(coldataOI$condition)
+
+# extract expression matrix
+rld <- rlog(ddsOI, blind = FALSE)
+expr_matrix <- assay(rld)
+
+# filter to genes of interest
+expr_matrixOI <- expr_matrix[
+  rownames(expr_matrix) %in% genesOI$gene_id,
+]
+
+#--------------------------------------------------------------------
+# TF ENRICHMENT ANALYSES
+#--------------------------------------------------------------------
+# Get high confidence regulons
+data("dorothea_mm")
+regulon <- dorothea_mm %>%
+  dplyr::filter(confidence %in% c("A","B","C"))
+
+# run VIPER
+tf_activities <- run_viper(
+  mat = expr_matrixOI,
+  network = regulon,
+  .source = "tf",
+  .target = "target",
+  .mor = "mor",
+  minsize = 5
+)
+
+# write to file
+write_tsv(tf_activities, "output/TF_analyses/XR261_TF_activity_enrichment_per_sample.tsv")
+
+#--------------------------------------------------------------------
+# LIMMA STATISTICAL ANALYSES ACROSS CONDITIONS
+#--------------------------------------------------------------------
+# convert to wide results table
+tf_matrix <- tf_activities %>%
+  select(source, condition, score) %>%
+  pivot_wider(names_from = condition, values_from = score) %>%
+  column_to_rownames("source")
+
+# align columns of matrix with coldata (conditions)
+tf_matrix <- tf_matrix[, rownames(coldataOI)]
+
+# design matrix
+design <- model.matrix(~ treatment, data = coldataOI)
+
+# run limma
+fit <- lmFit(tf_matrix, design)
+fit <- eBayes(fit)
+tf_results <- topTable(fit, number = Inf)
+
+# write to file
+to_file <- tf_results %>%
+  rownames_to_column("TF")
+write_tsv(to_file, "output/TF_analyses/XR261_TF_activity_differential_analyses.tsv")
+
+#--------------------------------------------------------------------
+# PLOT RESULTS AS VOLCANO PLOT
+#--------------------------------------------------------------------
+# define cutoffs
+logFC_cutoff <- 1
+pval_cutoff <- 0.05
+
+# add significance column
+tf_results$TF <- rownames(tf_results)
+tf_results$Significant <- with(tf_results, adj.P.Val < pval_cutoff & abs(logFC) > logFC_cutoff)
+
+# Volcano plot
+p <- ggplot(tf_results, aes(x = logFC, y = -log10(adj.P.Val))) +
+      geom_point(aes(color = Significant), size = 5, alpha = 0.5) +
+      scale_color_manual(values = c("grey", "darkred")) +
+      geom_vline(xintercept = c(-logFC_cutoff, logFC_cutoff), linetype = "dashed", color = "grey20") +
+      geom_hline(yintercept = -log10(pval_cutoff), linetype = "dashed", color = "grey20") +
+      geom_text_repel(
+        data = tf_results[tf_results$Significant, ],
+        aes(label = TF),
+        max.overlaps = 20
+      ) +
+      ylim(0,20) +
+      xlim(-3.5,3.5) +
+      theme_bw() +
+      theme(aspect.ratio = 1) +
+      labs(
+        title = "Differential TF activity BMEC PIC vs ctrl",
+        x = "log2 Fold Change (TF activity)",
+        y = "-log10(adj.P.Val)",
+        color = "Significant"
+      )
+print(p)
+
+#--------------------------------------------------------------------
+# PLOT RESULTS AS HEATMAP with INDIVIDUAL VALUES
+#--------------------------------------------------------------------
+# filter significant TFs
+sig_TFs <- tf_results %>% 
+  dplyr::filter(adj.P.Val < pval_cutoff) %>%
+  pull(TF)
+
+# subset wide TF matrix
+tf_sig_matrix <- tf_matrix[sig_TFs, ]
+
+# row-wise z-score normalization
+tf_z <- t(scale(t(tf_sig_matrix)))
+
+# plot heatmap
+p <- pheatmap::pheatmap(tf_z, 
+             cluster_rows = TRUE, 
+             cluster_cols = TRUE,
+             show_rownames = TRUE,
+             show_colnames = TRUE,
+             annotation_col = coldata["treatment"],
+             main = "Differential TF activity BMEC PIC vs ctrl")
+grid::grid.newpage()
+grid::grid.draw(p$gtable)
+
+rm(list = ls())
+```
+
+## APPENDIX
+```{r appendix}
+# which R packages and versions?
+if ("devtools" %in% installed.packages()) devtools::session_info()
+```
+

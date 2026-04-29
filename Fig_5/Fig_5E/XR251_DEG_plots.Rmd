@@ -1,0 +1,135 @@
+---
+title: "XR251_DEG_plot"
+author: "Alexander Lercher"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+## LOAD PACKAGES
+```{r load packages}
+library(ggplot2)
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+```
+
+## LOAD in DEG files
+```{r load DEG files}
+list_of_files <- list.files(
+  path = "output/DEG",
+  pattern = "\\.tsv$",
+  full.names = TRUE
+)
+
+# read in files and put them in a list
+data_list <- lapply(list_of_files, read_tsv)
+
+# rename list acc to input file
+names(data_list) <- tools::file_path_sans_ext(basename(list_of_files))
+```
+
+## IDENTIFY NUMBER OF DEGs
+```{r identify number of DEGs}
+# set DEG cutoffs
+log2FC_cutoff <- 0.5
+padj_cutoff <- 0.05
+
+# filter for DEGs
+data_list_sig <- lapply(data_list,
+                        dplyr::filter,
+                        abs(avg_log2FC) >= log2FC_cutoff,
+                        p_val_adj < padj_cutoff)
+
+# count number of DEG
+deg_counts_list <- lapply(
+  data_list_sig,
+  function(df) {
+    df %>%
+      mutate(direction = if_else(avg_log2FC > 0, "up", "down"),
+             direction = factor(direction, levels = c("up", "down"))) %>%
+      count(cluster, direction) %>%
+      mutate(n = if_else(direction == "down", -n, n))
+  }
+)
+
+# print number of DEG
+lapply(names(deg_counts_list), function(nm) {
+  cat("DEG counts for:", nm, "\n")
+  
+  deg_counts_list[[nm]] %>%
+    kable(
+      format = "pipe",
+      digits = 0,
+      caption = paste("DEG counts for", nm)
+    )
+})
+
+# save number of DEGs
+all_deg_counts <- dplyr::bind_rows(
+  deg_counts_list,
+  .id = "comparison"
+) %>%
+  write_csv("output/DEG/DEG_counts.csv")
+```
+
+## PLOT NUMBER OF DEGs
+```{r plot number of DEGs}
+# reorder to match the dotplot generated previously
+new_order <- rev(c("Excitatory neurons",
+                   "Inhibitory neurons",
+                   "Interneurons",
+                   "Oligodendrocytes",
+                   "OPCs",
+                   "Astrocytes",
+                   "Microglia",
+                   "Endothelial cells",
+                   "Pericytes",
+                   "Fibroblast-like",
+                   "Fibroblast",
+                   "Ventricular Epithelial cells"))
+
+deg_counts_list <- lapply(
+  deg_counts_list,
+  function(df) {
+    df %>%
+      mutate(cluster = factor(cluster, levels = new_order))
+  }
+)
+
+# PLOT BAR GRAPH
+# maximum changed genes for any cluster and any comparison
+max_abs_all <- max(
+  sapply(deg_counts_list, function(df) max(abs(df$n)))
+)
+
+# generate plots, save in list
+plot_list <- setNames(
+  lapply(
+  names(deg_counts_list),
+  function(nm) {
+    ggplot(deg_counts_list[[nm]],
+           aes(x = factor(cluster), y = n, fill = direction)) +
+      geom_col() +
+      scale_fill_brewer(palette = "Set1") +
+      labs(
+        title = nm,
+        x = "Cluster",
+        y = "Number of DEGs"
+      ) +
+      ylim(-max_abs_all,max_abs_all) +
+      theme_bw() +
+      theme(aspect.ratio = 1) +
+      coord_flip()
+  }
+),
+names(deg_counts_list))
+plot_list
+print(plot_list)
+```
+
+## APPENDIX
+```{r appendix}
+# which R packages and versions?
+if ("devtools" %in% installed.packages()) devtools::session_info()
+```
+

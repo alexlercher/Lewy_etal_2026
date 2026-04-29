@@ -1,0 +1,171 @@
+---
+title: "XR261_DESeq2_top500"
+author: "Alexander Lercher"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+## LOAD PACKAGES
+```{r load packages}
+library(tidyr)
+library(dplyr)
+library(readr)
+library(stringr)
+library(ggplot2)
+library(gplots)
+library(RColorBrewer)
+library(DESeq2)
+library(pheatmap)
+library(edgeR)
+```
+
+## DATA IMPORT AND CLEANUP
+```{r data import and cleanup}
+# import table with reads of all samples
+data <- read_csv("input/raw_counts.csv")
+
+# remove columns not needed
+data_clean <- data %>%
+  dplyr::select(-Length)
+
+# Rename columng Gene.name to gene, make it first column and remove NA genes
+data_clean <- data_clean %>%
+  dplyr::rename(gene = Gene.name) %>%
+  dplyr::select(gene, everything()) %>%
+  filter(!is.na(gene))
+
+# remove duplicates, keep the one with highest counts
+# Group by gene name, calculate the sum of counts across samples, and keep the row with the highest sum
+data_clean <- data_clean %>%
+  rowwise() %>%
+  mutate(sum_except_one = sum(c_across(-gene))) %>%
+  group_by(gene) %>%
+  arrange(desc(sum_except_one)) %>%
+  slice_head() %>%
+  ungroup() %>%
+  dplyr::select(!sum_except_one)
+
+# define data_clean as data_raw
+data_raw <- data_clean
+
+# make gene names row names and remove gene column
+data_raw <- as.data.frame(data_raw)
+rownames(data_raw) <- as.vector(data_raw$gene)
+data_raw$gene <- NULL
+rm(data,data_clean)
+```
+
+## IMPORT METADATA AND COMPARISONS OF INTEREST
+```{r import comparisons of interest}
+# import table with metadata of all samples
+metadata <- read.table("input/metadata.txt", header = T)
+
+# make sure metadata row order is same as column names of data
+# get desired order of row names
+desired_order <- names(data_raw)
+
+# reorder the rows based on the desired order
+metadata <- metadata %>%
+  arrange(match(variable, desired_order))
+
+# import table with groups you want to compare with
+# add column with comparison name
+# add column with comparison number
+DE_groups <- read.table("input/group_comparisons.txt", header = T)
+
+comparison_name <- list()
+comparison_number <- list()
+for(i in 1:nrow(DE_groups)){
+  x <- paste0(DE_groups[i,1],"_vs_",DE_groups[i,2])
+  comparison_name[[i]] <- x
+  comparison_number[[i]] <- i
+}
+DE_groups$Comparison <- comparison_name
+DE_groups$ComparisonNumber <- comparison_number
+rm(comparison_name, comparison_number)
+```
+
+## RUN DESEQ2
+```{r run DESeq2}
+# DESeq analyses and create DESeq object
+dds <- DESeqDataSetFromMatrix(countData = as.matrix(data_raw),
+                              colData = metadata,
+                              design = ~ description)
+dds <- DESeq(dds)
+```
+
+## GET TOP 500 VARIABLE GENES
+```{r get top 500 variable genes}
+vsd <- vst(dds, blind = TRUE)
+vsd_mat <- assay(vsd)
+gene_var <- apply(vsd_mat, 1, var)
+
+top_n_genes <- 500
+top_genes <- names(sort(gene_var, decreasing = TRUE))[1:top_n_genes]
+vsd_top <- vsd_mat[top_genes, ]
+```
+
+## PCA FOR TOP 500 VARIABLE GENES
+```{r PCA for top 500 variable genes}
+p <- plotPCA(vsd, intgroup = "description", ntop = 500) +
+  scale_color_brewer(palette = "Set1") + 
+  theme_bw() + 
+  ggtitle("PCA top 500 variable genes") +
+  theme(aspect.ratio = 1) +
+  geom_text(aes(label = name), vjust = -0.5)
+
+print(p)
+```
+
+## HEATMAP TOP 500 GENES
+```{r heatmap of top 500 genes}
+cluster_count <- 3
+# Compute correlation distance for rows (genes) and clustering
+dist_rows <- as.dist(1 - cor(t(vsd_top), method = "pearson"))
+hc_rows <- hclust(dist_rows, method = "average")
+
+# cut into 3 clusters
+gene_clusters <- cutree(hc_rows, k = cluster_count)
+
+# calculate cpm
+cpm_mat <- cpm(counts(dds), log = FALSE)
+cpm_top <- cpm_mat[top_genes, ]
+
+# save to tsv
+cluster_df <- data.frame(
+  gene      = names(gene_clusters),
+  cluster   = gene_clusters
+)
+
+cluster_df <- cbind(cluster_df, as.data.frame(cpm_top[names(gene_clusters), ]))
+
+write.table(cluster_df,
+            file = paste0("output/gene_clusters_top",as.character(top_n_genes),"_genes.tsv"),
+            sep = "\t",
+            quote = FALSE,
+            row.names = FALSE)
+
+# prepare row annotation to use my calculated clusters
+row_anno <- data.frame(Cluster = factor(gene_clusters[top_genes]))
+rownames(row_anno) <- top_genes
+
+# plot heatmap
+p <- pheatmap::pheatmap(vsd_top,
+             scale = "row",
+             show_rownames = FALSE,
+             annotation_col = as.data.frame(colData(dds)[, "description", drop = FALSE]),
+             annotation_row = row_anno,
+             cluster_rows = hc_rows,
+             main = paste0("Clustering of Top ",as.character(top_n_genes)," genes"),
+             cluster_cols = TRUE,
+             fontsize_col = 10)
+grid::grid.newpage()
+grid::grid.draw(p$gtable)
+```
+
+## APPENDIX
+```{r appendix}
+# which R packages and versions?
+if ("devtools" %in% installed.packages()) devtools::session_info()
+```
+

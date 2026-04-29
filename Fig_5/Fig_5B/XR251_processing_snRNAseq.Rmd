@@ -1,9 +1,7 @@
 ---
 title: "Brain endothelial cells orchestrate a neuroprotective antiviral state in the central nervous system in response to peripheral viral pattern sensing"
 date: "2026-04-21"
-output:
-  html_document: default
-  pdf_document: default
+output: github_document
 ---
 
 ```{r setup, eval = FALSE }
