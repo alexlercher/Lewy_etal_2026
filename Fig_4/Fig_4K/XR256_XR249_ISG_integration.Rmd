@@ -1,0 +1,290 @@
+---
+title: "XR256_XR249_ISG_integration"
+author: "Alexander Lercher"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+## LOAD PACKAGES
+```{r load packages}
+library(readr)
+library(tidyverse)
+library(dplyr)
+library(pheatmap)
+library(ggpubr)
+library(grid)
+```
+
+## DATA IMPORT AND CLEANUP
+```{r data import and cleanup}
+list_of_files <- list.files(path = "../XR256_DESeq2/output",
+                            recursive = FALSE,
+                            pattern = "DEG.tsv",
+                            full.names = TRUE)
+
+# filter for files that contain IFNb exactly once
+filtered_files <- list_of_files[str_count(list_of_files, "PIC_vs_PBS") == 1]
+
+data <- readr::read_tsv(filtered_files, id = NULL)
+
+data_fpkm <- read.delim("../XR256_DESeq2/output/XR256_FPKM.tsv")
+data_fpkm <- data_fpkm %>%
+  dplyr::select(matches("^(gene|PBS|PIC)"))
+```
+
+## EXTRACT SIGNIFICANT GENES AND USE FPKM CUTOFF
+```{r extract significant genes and use FPKM cutoff}
+adj_pval_cutoff = 0.05
+log2FC_cutoff = 1
+FPKM_cutoff = 1
+
+# sort by gene and by log2FC high to low and remove duplicates
+data_sig <- data %>%
+  arrange(gene_id, desc(log2FoldChange)) %>%
+  distinct(gene_id, .keep_all = T) %>%
+  dplyr::select(gene_id,log2FoldChange,padj)
+
+# filter for genes meeting pval and log2FC cutoffs
+data_sig <- data_sig %>%
+  filter(padj < adj_pval_cutoff, log2FoldChange > log2FC_cutoff)
+
+# merge with FPKM data, add mean fpkm and filter for fpkm cutoff
+data_sig <- data_fpkm %>%
+  dplyr::rename(gene_id = gene) %>%
+  left_join(data_sig) %>%
+  na.omit() %>%
+  mutate(
+    mean_PBS  = rowMeans(dplyr::select(., starts_with("PBS"))),
+    mean_PIC = rowMeans(dplyr::select(., starts_with("PIC")))
+    ) %>%
+  mutate(
+    mean_all = rowMeans(dplyr::select(., starts_with("mean")))
+  )
+
+data_sig <- data_sig %>%
+  filter(mean_all > FPKM_cutoff) %>%
+  dplyr::select(matches("^(gene|PBS|PIC)"))
+```
+
+## GET LIST OF ISGs FROM XR249
+```{r get list of ISGs from XR252}
+# get list of ISG names and save to file
+# get list of ISG names and save to file
+data_ISG <- read.delim("input/XR249_ISG_expression_brain.tsv")
+data_ISG <- data_ISG %>%
+  dplyr::select(matches("^(gene|PBS|IFN)")) %>%
+  dplyr::rename_with(~ str_replace(.x, "^PBS", "PBS_CTL"))
+```
+
+## CALCULATE GENE SET EXPRESSION ACROSS CONDITIONS
+```{r calculate gene set expression across conditions}
+# merge IFN induced genes with PIC induced genes
+ISG_fpkm <- data_ISG %>%
+  left_join(data_sig) %>%
+  dplyr::rename(gene = gene_id) %>%
+  na.omit()
+
+# make genes rownames delete gene column
+ISG_fpkm <- as.data.frame(ISG_fpkm)
+rownames(ISG_fpkm) <- ISG_fpkm$gene
+ISG_fpkm$gene = NULL
+
+# calculate average ISG FPKM value per sample
+ISG_set_expression <- colSums(ISG_fpkm)/nrow(ISG_fpkm)
+
+# write ISG expression values to file
+ISG_set_expression_df <- data.frame(
+  condition = names(ISG_set_expression),
+  ISG_expression = as.numeric(ISG_set_expression),
+  row.names = NULL,
+  stringsAsFactors = FALSE) %>%
+  write_tsv("output/XR256_ISG_set_expression.tsv")
+```
+
+## PLOT SUMMARY DATA as BARPLOTS
+```{r plot summary data as barplots}
+# define metadata/groups
+metadata <- data.frame(
+  sample_id = colnames(ISG_fpkm),
+  condition = c(rep("PBS_CTL", 3), rep("IFNa", 3), 
+                rep("PBS", 4), rep("PIC", 4))
+)
+
+# combine metadata with data to plot
+plot_data <- metadata %>%
+  mutate(score = ISG_set_expression[sample_id])
+
+plot_data$condition <- factor(plot_data$condition, levels = c("PBS_CTL", "IFNa", "PBS", "PIC"))
+
+# prepare y axis breaks and labels
+max_exp <- ceiling(log2(max(plot_data$score, na.rm = TRUE)))
+breaks <- 2^(0:max_exp)
+labels <- parse(text = paste0("2^", 0:max_exp))
+
+# prepare labels and position
+label_data <- plot_data %>%
+  group_by(condition) %>%
+  summarise(mean_val = mean(score, na.rm = TRUE),
+            y_pos = max(score, na.rm = TRUE) * 1.1)
+
+# plot data
+p <- ggplot(plot_data, aes(x = condition, y = score, fill = condition)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(width = 0.2, size = 2, alpha = 0.7) +
+    geom_text(data = label_data,
+              aes(x = condition, y = y_pos, label = round(mean_val, 1)),
+              inherit.aes = FALSE,
+              size = 3.5,
+              color = "black") +
+    scale_y_continuous(
+      trans = "log2",
+      breaks = breaks,
+      labels = labels) +
+    labs(
+      title = "Expression of ISGs",
+      y = "Mean FPKM of ISG set",
+      x = "") +
+    theme_bw() +
+    theme(aspect.ratio = 1)
+print(p)
+```
+
+## CURATE DATA JOIN DATASETS INDUCED BY POLYIC AND IFNA KEEP ALL THAT ARE UP BY POLYIC
+```{r curate data join datasets induced by polyIC and IFNa keep all that are up by polyIC}
+# merge PIC induced genes with IFNa induced genes but keep all from PIC
+data_all_IFNa <- read.delim("../../XR249_TL396_iv_IFN-a_brain_RNAseq/XR249_RNAseq_analyses_AL/XR249_DESeq2/output/XR249_FPKM.tsv")
+data_all_IFNa <- data_all_IFNa %>%
+  dplyr::rename_with(~ str_replace(.x, "^PBS", "PBS_CTL")) %>%
+  rename(gene_id = gene)
+  
+data_fpkm <- data_sig %>%
+  left_join(data_all_IFNa)
+
+# make genes rownames delete gene column
+data_fpkm <- as.data.frame(data_fpkm)
+rownames(data_fpkm) <- data_fpkm$gene_id
+data_fpkm$gene_id = NULL
+```
+
+## PLOT HEATMAP OF INDIVIDUAL VALUES GENES UP BY POLYIC
+```{r plot heatmap of individual values genes up by polyIC}
+# define formula to calculate row Z score
+cal_z_score <- function(x){
+  (x - mean(x)) / sd(x)
+}
+
+# calculate row Z score for FPKMs for each row (gene) of interest
+data_fpkm_norm <- t(apply(data_fpkm, 1, cal_z_score))
+
+# annotate sample columns
+my_sample_col <- data.frame(sample = c(rep("PBS",4),
+                                       rep("PIC",4),
+                                       rep("PBS_CTL",3),
+                                       rep("IFNa",3)),
+                            condition = c(rep("ctl",4),
+                                          rep("polyIC",4),
+                                          rep("ctl",3),
+                                          rep("IFNa",3)))
+
+row.names(my_sample_col) <- colnames(data_fpkm)
+
+# calculate dendrogram
+hc <- hclust(dist(data_fpkm_norm), method = "complete")
+
+# add cluster information to heatmap
+numberofclusters = 2
+my_gene_col <-cutree(hc, k = numberofclusters)
+my_gene_col <- data.frame(cluster = ifelse(test = my_gene_col == 1, yes = "1", no = "2"))
+
+# add ISG information to heatmap
+ISG_list <- data_ISG$gene_id
+my_gene_col$ISG <- ifelse(rownames(my_gene_col) %in% ISG_list, 1, 0)
+
+p <- pheatmap::pheatmap(data_fpkm_norm, annotation_col = my_sample_col, annotation_row = my_gene_col, 
+             show_rownames = F, main = "genes induced by poly(I:C)",
+             #color = colorRampPalette(c("midnightblue", "ivory", "firebrick3"))(50),
+             cutree_rows = numberofclusters)
+grid::grid.newpage()
+grid::grid.draw(p$gtable)
+
+# add cluster and ISG information to DEG list
+my_gene_col$gene_id <- rownames(my_gene_col)
+data_fpkm$gene_id <- rownames(data_fpkm)
+data_save <- data_fpkm %>%
+  left_join(my_gene_col) %>%
+  na.omit() %>%
+  dplyr::relocate(gene_id) %>%
+  arrange(cluster)
+
+write_tsv(data_save, "output/XR259_ISG_heatmap_individual.tsv")
+```
+
+## PLOT HEATMAP OF MEAN VALUES GENES UP BY POLYIC
+```{r plot heatmap of mean values genes up by polyIC}
+# add means for all conditions
+# add means for all conditions
+data_fpkm_mean <- data_fpkm %>%
+  mutate(
+    mean_PBS  = rowMeans(select(., starts_with("PBS"))),
+    mean_PIC = rowMeans(select(., starts_with("PIC"))),
+    mean_PBS_CTL  = rowMeans(select(., starts_with("PBS_CTL"))),
+    mean_IFNa = rowMeans(select(., starts_with("IFNa")))
+  )
+
+# keep mean FPKM values only
+data_fpkm_mean <- data_fpkm_mean %>%
+  dplyr::select(contains(c("mean")))    
+
+# calculate row Z score for FPKMs for each row (gene) of interest
+data_fpkm_mean_norm <- t(apply(data_fpkm_mean, 1, cal_z_score)) 
+
+# annotate sample columns
+my_sample_col <- data.frame(sample = c(rep("PBS",1),
+                                       rep("PIC",1),
+                                       rep("PBS_CTL",1),
+                                       rep("IFNa",1)),
+                            condition = c(rep("ctl",1),
+                                          rep("polyIC",1),
+                                          rep("ctl",1),
+                                          rep("IFNa",1)))
+
+row.names(my_sample_col) <- colnames(data_fpkm_mean)
+
+# calculate dendrogram
+hc <- hclust(dist(data_fpkm_mean_norm), method = "complete")
+
+# add cluster information to heatmap
+numberofclusters = 2
+my_gene_col <-cutree(hc, k = numberofclusters)
+my_gene_col <- data.frame(cluster = ifelse(test = my_gene_col == 1, yes = "1", no = "2"))
+
+# add ISG information to heatmap
+my_gene_col$ISG <- ifelse(rownames(my_gene_col) %in% ISG_list, 1, 0)
+
+# plot heatmap
+p <- pheatmap::pheatmap(data_fpkm_mean_norm, annotation_col = my_sample_col, annotation_row = my_gene_col, 
+             show_rownames = F, main = "genes induced by poly(I:C)",
+             #color = colorRampPalette(c("midnightblue", "ivory", "firebrick3"))(50),
+             cutree_rows = numberofclusters
+             )
+grid::grid.newpage()
+grid::grid.draw(p$gtable)
+
+# add cluster and ISG information to DEG list
+my_gene_col$gene_id <- rownames(my_gene_col) 
+data_fpkm$gene_id <- rownames(data_fpkm)
+data_save <- data_fpkm %>%
+  left_join(my_gene_col) %>%
+  na.omit() %>%
+  dplyr::relocate(gene_id) %>%
+  arrange(cluster)
+
+write_tsv(data_save, "output/XR256_ISG_heatmap_means.tsv")
+```
+
+## APPENDIX
+```{r appendix}
+# which R packages and versions?
+if ("devtools" %in% installed.packages()) devtools::session_info()
+```
+
