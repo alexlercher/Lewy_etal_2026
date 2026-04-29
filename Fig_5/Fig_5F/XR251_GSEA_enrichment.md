@@ -334,7 +334,7 @@ if(is.null(gse)){
   }
 ```
 
-![](XR251_GO_enrichment_files/figure-gfm/GSEA%20gseGO%20enrichment-1.png)<!-- -->
+![](XR251_GSEA_enrichment_files/figure-gfm/GSEA%20gseGO%20enrichment-1.png)<!-- -->
 
 ``` r
 print(paste0(cluster_name[[y]]," done!"," We are in comparison ",comparison_name[[i]],". ",length(cluster_name)-y," of ",length(cluster_name),
