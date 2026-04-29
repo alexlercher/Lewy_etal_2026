@@ -1,0 +1,456 @@
+---
+title: "Brain endothelial cells orchestrate a neuroprotective antiviral state in the central nervous system in response to peripheral viral pattern sensing"
+date: "2026-04-21"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, eval = FALSE }
+#library("SeuratDisk")
+library(eulerr)
+library(dplyr)
+library(scDblFinder)
+library(Seurat)
+library(SingleCellExperiment)
+library(SeuratObject)
+library(ggplot2)
+library(future)
+library(scPred)
+library(harmony)
+library(fgsea)
+library(viridis)
+library(TSCAN)
+library(scater)
+library(tradeSeq)
+library(Matrix)
+```
+
+### Data processing
+
+Processing and analysis of single-cell RNA seq data from mice brains infected with WNV.
+
+```{r preprocessing, eval = FALSE}
+# Join files of sample IDs 
+samples <- c("24177-05-01", "24177-05-02", "24177-05-03")
+
+seu_list <- lapply(samples, function(s) {
+
+  mtx_path <- file.path(base_dir,s,"outs", "raw_feature_bc_matrix")
+
+  counts <- Read10X(mtx_path)
+
+  obj <- CreateSeuratObject(
+    counts,
+    project = s
+  )
+
+  # add a sample column to metadata
+  obj$sample <- s
+
+  obj
+})
+
+names(seu_list) <- samples
+
+#Merge all samples
+seu <- merge(
+  seu_list[[1]],
+  y = seu_list[2:3],
+  add.cell.ids = samples,   # prefixes barcodes with sample IDs
+  project = "brain_wnv"
+)
+DefaultAssay(seu) <- "RNA"
+
+# how many cells per sample?
+table(seu$sample)
+colnames(seu@meta.data)
+
+# Calculate % mitochondrial (mouse genes usually start with "mt-")
+seu[["percent.mt"]] <- PercentageFeatureSet(seu, pattern = "^mt-")
+
+# Visualize QC metrics
+qc <- seu@meta.data
+
+# nFeature_RNA
+ggplot(qc, aes(x = sample, y = nFeature_RNA)) +
+  geom_violin(trim = TRUE) +
+  scale_y_continuous(trans = "log10") +
+  theme_bw() +
+  ggtitle("nFeature_RNA by sample")
+
+# nCount_RNA
+ggplot(qc, aes(x = sample, y = nCount_RNA)) +
+  geom_violin(trim = TRUE) +
+  scale_y_continuous(trans = "log10") +
+  theme_bw() +
+  ggtitle("nCount_RNA by sample")
+
+# percent.mt
+ggplot(qc, aes(x = sample, y = percent.mt)) +
+  geom_violin(trim = TRUE) +
+  theme_bw() +
+  ggtitle("percent.mt by sample")
+
+
+# Filter cells ( adjust after looking at plots)
+seu <- subset(
+  seu,
+  subset = nFeature_RNA > 500 &
+    nFeature_RNA < 6000 &
+    nCount_RNA < 60000 &
+    percent.mt < 10
+)
+
+# Remove Doublets
+colnames(seu@meta.data)
+
+#Join all per-sample layers into one
+seu_joined <- JoinLayers(seu) 
+sce <- as.SingleCellExperiment(seu_joined)
+sce <- scDblFinder(sce, samples = "sample")
+
+table(sce$scDblFinder.class)
+
+# add classifications back to Seurat and keep singlets
+seu_joined$scDblFinder.class <- sce$scDblFinder.class
+seu_singlets <- subset(seu_joined, subset = scDblFinder.class == "singlet")
+
+# Normalize by sample
+seu_list <- SplitObject(seu_singlets, split.by = "sample")
+
+# SCTransform 
+for (i in 1:length(seu_list)) {
+  seu_list[[i]] <- SCTransform(
+    seu_list[[i]],
+    vst.flavor = "v2",
+    verbose = FALSE
+  )
+}
+
+
+# Integration features
+
+features   <- SelectIntegrationFeatures(seu_list, nfeatures = 1000) #Select features. reducing to 1000 to increase
+seu_list   <- PrepSCTIntegration(seu_list, anchor.features = features, verbose = FALSE) #Prepare for SCT-based integration
+# Run PCA on each object first (needed for rpca integration)
+for (i in seq_along(seu_list)) {
+  seu_list[[i]] <- RunPCA(seu_list[[i]], features = features, verbose = FALSE)
+}
+
+# Use RPCA-based anchors (FASTER)
+anchors <- FindIntegrationAnchors(
+  object.list = seu_list,
+  normalization.method = "SCT",
+  anchor.features = features,
+  reduction = "rpca",     # Makes it faster
+  dims = 1:30,
+  verbose = TRUE
+)
+
+seu_int <- IntegrateData(
+  anchorset = anchors,
+  normalization.method = "SCT",
+  dims = 1:30,
+  verbose = TRUE
+)
+
+#Dimensionality reduction & clustering
+
+DefaultAssay(seu_int) <- "integrated"
+seu_int <- RunPCA(seu_int)
+#ElbowPlot(seu_int)
+
+#Find neighbors and clusters
+seu_int <- FindNeighbors(seu_int, dims = 1:30)
+seu_int <- FindClusters(seu_int, resolution = 0.4) 
+
+#UMAP
+seu_int <- RunUMAP(seu_int, dims = 1:30)
+seu_int
+DimPlot(seu_int, reduction = "umap", group.by = "sample", label = TRUE)
+
+#Marker identification (for annotation)
+DefaultAssay(seu_int) <- "SCT" #integrated
+
+#Prepare the object for DE testing on SCT
+seu_int <- PrepSCTFindMarkers(seu_int)
+
+#call markers
+markers <- FindAllMarkers(
+  seu_int,
+  only.pos        = TRUE,
+  min.pct         = 0.25,
+  logfc.threshold = 0.25
+)
+
+#Inspect the result
+dim(markers)
+head(markers)
+DimPlot(seu_int, reduction = "umap",label = TRUE)
+top10_markers <- markers %>%
+  group_by(cluster) %>%
+  slice_max(order_by = avg_log2FC, n = 10) %>%
+  arrange(cluster, desc(avg_log2FC))
+
+
+
+
+```
+
+### Cell annotation
+
+#### Annotation prediction with sc-type
+
+```{r sc-type, eval = FALSE}
+lapply(c("dplyr","Seurat","HGNChelper","openxlsx"), library, character.only = T)
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R"); source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+db_ <- "https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/ScTypeDB_full.xlsx";
+tissue <- "Brain" 
+gs_list <- gene_sets_prepare(db_, tissue)
+
+DefaultAssay(seu_int) <- "SCT"
+Layers(seu_int[["SCT"]])# Check available layers
+mat <- GetAssayData(seu_int, assay = "SCT", layer = "data")
+mat <- as.matrix(mat)
+
+# score cluster-level signatures
+es.max <- sctype_score(scRNAseqData = mat, scaled = TRUE, gs = gs_list$gs_positive) 
+
+# merge by cluster
+cl_results <- do.call("rbind", lapply(unique(seu_int@meta.data$seurat_clusters), function(cl){
+   es.max.cl = sort(rowSums(es.max[ ,rownames(seu_int@meta.data[seu_int@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+   head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(seu_int@meta.data$seurat_clusters==cl)), 10)
+ }))
+sctype_scores <- cl_results %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+ sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] <- "Unknown"
+print(sctype_scores[,1:3])
+ 
+# Overlap classification to umap
+seu_int@meta.data$sctype_classification = ""
+for(j in unique(sctype_scores$cluster)){
+   cl_type = sctype_scores[sctype_scores$cluster==j,]; 
+   seu_int@meta.data$sctype_classification[seu_int@meta.data$seurat_clusters == j] = as.character(cl_type$type[1])
+ }
+
+ DimPlot(seu_int,
+         reduction = "umap", 
+         label = TRUE, repel = TRUE, group.by = 'sctype_classification')#,split.by = "sample"
+ 
+
+# Create a dataframe of cell-level metadata
+cell_counts <- seu_int@meta.data %>%
+  group_by(sample, sctype_classification) %>%
+  summarise(n_cells = n(), .groups = "drop")
+
+ggplot(cell_counts, aes(x = sctype_classification, y = n_cells)) +
+  geom_bar(stat = "identity") + facet_wrap(~sample) + theme_bw()+ theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(cell_counts, aes(x = sample, y = n_cells)) +
+  geom_bar(stat = "identity") + facet_wrap(~sctype_classification, scales="free_y") + theme_bw()+ theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#Classify cells using scpred model with 
+devtools::install_github(
+  repo  = "powellgenomicslab/scPred",
+  ref   = "9f407b7436f40d44224a5976a94cc6815c6e837f",  
+  force = TRUE
+)
+#saveRDS(reference_rank1, file = "brain_atlas_ref_1.RDS")
+
+reference=readRDS("brain_atlas_ref_1.RDS")
+seu_int <- scPredict(seu_int, reference_rank2) 
+
+#Run UMAP using the aligned data as an input
+query_r2 <- RunUMAP(seu_int, reduction = "scpred", dims = 1:30)
+DimPlot(query_r2, group.by = "scpred_prediction", label = TRUE, repel = TRUE)
+
+query_r2 <- scPredict(query_r2, reference_rank3) #running 3 to keep the taxonomy more specialized
+
+DimPlot(seu_int, group.by = "scpred_prediction", reduction = "scpred")
+
+#Transfer cell labels to seurat
+celltype_mapper=read.csv("~/cell_mapper_10xWholeMouseBrain(CCN20230722)/marker_raw_counts_matrixcsv_10xWholeMouseBrain(CCN20230722)_HierarchicalMapping_UTC_1764890405839.csv", header = T,comment.char = "#", stringsAsFactors = F)
+
+labels <- celltype_mapper$class_name # Create a named vector of labels
+names(labels) <- celltype_mapper$cell_id
+
+seu_int$cell_type_mapper <- labels[colnames(seu_int)] #Transfer labels
+
+DimPlot(seu_int, group.by = "cell_type_mapper", label = TRUE, reduction = "umap")
+
+```
+
+#### Manually labeled cells
+
+```{r manual, eval = FALSE}
+
+Idents(seu_int) <- "seurat_clusters"  # start from clusters
+seu_int$manual <- as.character(seu_int$seurat_clusters)
+seu_int$manual[seu_int$seurat_clusters %in% c("25","2","4","35","28","37","7","33","5", "11","17")] <- "Excitatory neurons"
+seu_int$manual[seu_int$seurat_clusters %in% c("1","6","16","32","36","8","39","31","14")]      <- "Inhibitory neurons"
+seu_int$manual[seu_int$seurat_clusters %in% c("13","18")]      <- "Interneurons"
+seu_int$manual[seu_int$seurat_clusters %in% c("15","3", "22")]      <- "Astrocytes"
+seu_int$manual[seu_int$seurat_clusters %in% c("0","38", "29", "34")]      <- "Oligodendrocytes"
+seu_int$manual[seu_int$seurat_clusters %in% c("10", "26")]      <- "OPCs"
+seu_int$manual[seu_int$seurat_clusters %in% c("12","9")]      <- "Microglia"
+seu_int$manual[seu_int$seurat_clusters %in% c("20")]      <- "Endothelial cells"
+seu_int$manual[seu_int$seurat_clusters %in% c("24")]      <- "Pericytes"
+seu_int$manual[seu_int$seurat_clusters %in% c("21")]      <- "Excitatory neurons"
+seu_int$manual[(seu_int$seurat_clusters %in% c("23", "30" ))] <- "Fibroblast"
+seu_int$manual <- factor(seu_int$manual)
+Idents(seu_int)  <- "manual"
+
+p=DimPlot(seu_int, reduction = "umap", group.by = "manual",  cols =pal13 )
+
+p2=LabelClusters(
+  p, 
+  id = "manual",
+  repel = TRUE,        # keeps labels from overlapping clusters
+  size = 4
+) + theme_bw() + theme(text = element_text(size = 15), title = element_blank(), 
+                       axis.text = element_text(size=15, color="black"))
+
+p2
+
+
+```
+
+#### Finding markers of annotated clusters
+
+```{r markers, eval = FALSE}
+seu_int <- SetIdent(seu_int, value = "manual")
+
+markers_manual <- FindAllMarkers(
+  seu_int,
+  only.pos        = TRUE,
+  min.pct         = 0.25,
+  logfc.threshold = 0.25
+)
+
+#Inspect the result
+dim(markers_manual)
+head(markers_manual)
+
+#top markers for cell types
+top20_markers <- markers_manual %>%
+  group_by(cluster) %>%
+  slice_max(order_by = avg_log2FC, n = 20) %>%
+  arrange(cluster, desc(avg_log2FC))
+
+
+```
+
+#### Getting top genes between samples/times
+
+```{r top_genes, eval=FALSE}
+#cluster-specific differential expression (DE) pipeline comparing t0 vs t2 and t0 vs t16 inside each cluster using SCT-normalized Seurat data.
+
+DefaultAssay(seu_int) <- "SCT"
+seu_int <- PrepSCTFindMarkers(seu_int, verbose = TRUE)
+seu_int@assays$SCT@SCTModel.list <- list(seu_int@assays$SCT@SCTModel.list[[1]])
+length(seu_int@assays$SCT@SCTModel.list)
+# should print: [1] 1
+
+clusters <- levels(seu_int$manual)
+good_clusters <- names(which(tapply(seu_int$sample, seu_int$manual,
+                                    function(x) all(table(x) >= 3))))
+DE_results <- list()
+
+for (cl in good_clusters) {
+  
+  message("Running cluster: ", cl)
+  
+  cl_cells <- subset(seu_int, idents = cl)
+  
+  # how many cells per sample in THIS cluster
+  tab <- table(cl_cells$sample)
+  
+  # t0 vs t2
+  if ("24177-05-01" %in% names(tab) &&
+      "24177-05-02" %in% names(tab) &&
+      tab["24177-05-01"] >= 3 &&
+      tab["24177-05-02"] >= 3) {
+    
+    de_01 <- FindMarkers(
+      cl_cells,
+      ident.1 = "24177-05-01",
+      ident.2 = "24177-05-02",
+      group.by = "sample",
+      logfc.threshold = 0,
+      min.pct = 0.1
+    )
+    
+  } else {
+    message("  Skipping t0 vs t2 (missing or too few cells)")
+    de_01 <- NA
+  }
+  
+  # t0 vs t16
+  if ("24177-05-01" %in% names(tab) &&
+      "24177-05-03" %in% names(tab) &&
+      tab["24177-05-01"] >= 3 &&
+      tab["24177-05-03"] >= 3) {
+    
+    de_02 <- FindMarkers(
+      cl_cells,
+      ident.1 = "24177-05-01",
+      ident.2 = "24177-05-03",
+      group.by = "sample",
+      logfc.threshold = 0,
+      min.pct = 0.1
+    )
+    
+  } else {
+    message("  Skipping t0 vs t16 (missing or too few cells)")
+    de_02 <- NA
+  }
+  
+  DE_results[[cl]] <- list(
+    t0_vs_t2  = de_01,
+    t0_vs_t16 = de_02
+  )
+}
+
+#Find the biggest DE Clusters
+
+DE_strength <- data.frame(
+  cluster = character(),
+  n_DE_t0_vs_t2 = numeric(),
+  n_DE_t0_vs_t16 = numeric()
+)
+
+for (cl in names(DE_results)) {
+  
+  de01 <- DE_results[[cl]]$t0_vs_t2
+  de02 <- DE_results[[cl]]$t0_vs_t16
+  
+  # handle skipped clusters (NA)
+  if (is.data.frame(de01)) {
+    n01 <- sum(de01$p_val_adj < 0.05 & abs(de01$avg_log2FC) > 0.25)
+  } else n01 <- 0
+  
+  if (is.data.frame(de02)) {
+    n02 <- sum(de02$p_val_adj < 0.05 & abs(de02$avg_log2FC) > 0.25)
+  } else n02 <- 0
+  
+  DE_strength <- rbind(
+    DE_strength,
+    data.frame(cluster = cl, n_DE_t0_vs_t2 = n01, n_DE_t0_vs_t16 = n02)
+  )
+}
+
+DE_strength
+
+
+ggplot(DE_strength, aes(x = cluster, y = n_DE_t0_vs_t2)) +
+  geom_bar(stat = "identity") + ggtitle("Highest DEG in clusters t0 vs t2") +theme(axis.text.x = element_text(angle=45, hjust = 1))
+
+ggplot(DE_strength, aes(x = cluster, y = n_DE_t0_vs_t16)) +
+  geom_bar(stat = "identity") + ggtitle("Highest DEG in clusters t0 vs t16") +theme(axis.text.x = element_text(angle=45, hjust = 1))
+
+
+
+
+```
