@@ -31,7 +31,48 @@ setwd("/Users/tylerlewy/Desktop/network_plots_111825")
 data <- as_tibble(fread("/Users/tylerlewy/Desktop/network_plots_111825/Objects/for_Tyler.csv"))
 
 # 3) GO Enrichment -------------------------------------------------
-# Pull genes that were significantly upregulated in cluster 2
+# Pull genes from cluster 1
+gene.ids <- data%>%
+  filter(cluster == 1)%>%
+  pull(Gene)
+
+# Perform enrichment using mouse genome and GO:BP ontology
+ego.c1 <- enrichGO(gene = gene.ids,
+                   OrgDb = org.Mm.eg.db,
+                   keyType = "SYMBOL",
+                   ont = "BP",  
+                   pAdjustMethod = "BH",
+                   pvalueCutoff = 0.05,
+                   qvalueCutoff = 0.05)  
+
+# Need to add a measurement for similarity between nodes for emapplot to work
+to.emap.c1 <- pairwise_termsim(ego.c1)
+
+emap.plot.c1 <- emapplot(to.emap.c1, 
+                         showCategory = 15, 
+                         group = T, 
+                         node_label = "category",
+                         layout = "fr", 
+                         group_style = "ggforce",
+                         label_group_style = "ggforce", 
+                         nCluster = 3,
+                         nWords = 5, 
+                         min_edge = 0.4, 
+                         label_format = 10)
+
+enrich.export.c1 <- to.emap.c1@result%>%
+  filter(p.adjust < 0.05)%>%
+  arrange(desc(zScore))%>%
+  dplyr::select(c("ID", "Description", "FoldEnrichment", "zScore", "p.adjust"))
+
+write_csv(enrich.export.c1,
+          "/Users/tylerlewy/Desktop/network_plots_111825/Objects/enrichment_c1.csv")
+
+ggsave(emap.plot.c1,
+       file=paste0("/Users/tylerlewy/Desktop/network_plots_111825/Plots/emap.c1.unique.pdf"),
+       dpi = 300, units = c("cm"),width = 30, height = 30)
+
+# Repeat for cluster 2
 gene.ids <- data%>%
   filter(cluster == 2)%>%
   pull(Gene)
@@ -114,3 +155,4 @@ write_csv(enrich.export.c3,
 ggsave(emap.plot.c3,
        file=paste0("/Users/tylerlewy/Desktop/network_plots_111825/Plots/emap.c3.unique.pdf"),
        dpi = 300, units = c("cm"),width = 30, height = 30)
+
