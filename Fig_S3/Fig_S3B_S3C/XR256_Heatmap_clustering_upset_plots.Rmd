@@ -1,0 +1,331 @@
+---
+title: "XR256_Heatmap_clustering_Upset_plot"
+author: "Alexander Lercher"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+## LOAD PACKAGES
+```{r load packages}
+library(readr)
+library(tidyverse)
+library(dplyr)
+library(pheatmap)
+library(ComplexUpset)
+library(ggplot2)
+library(grid)
+```
+
+## DATA IMPORT AND CLEANUP
+```{r data import and cleanup}
+list_of_files <- list.files(path = "../XR256_DESeq2/output",
+                            recursive = FALSE,
+                            pattern = "DEG.tsv",
+                            full.names = TRUE)
+
+data <- readr::read_tsv(list_of_files, id = NULL)
+
+data_fpkm <- read.delim("../XR256_DESeq2/output/XR256_FPKM.tsv")
+
+# what are the comparisons made
+data_summary <- data %>%
+  group_by(comparison) %>%  
+  distinct(comparison_name)
+```
+
+## FILTER FOR AND EXTRACT DEGs
+```{r filter for and extract DEGs}
+# define log2FC and adjPval cutoffs
+log2FC_cutoff = 1
+adjpval_cutoff = 0.05
+
+# subset data by cutoff criteria
+significant_DEG <- data %>%
+  group_by(comparison) %>%
+  filter(abs(log2FoldChange) > log2FC_cutoff & padj < adjpval_cutoff)
+
+# count significant genes per condition
+count_DEG <-  significant_DEG %>%
+  group_by(comparison, comparison_name) %>%
+  count(nrow(comparison)) %>%
+  dplyr::rename(DEG_count = n) %>%
+  print()
+
+# put DEG of individual comparisons into list
+list_DEG_comparisons <- list()
+for(i in 1:length(count_DEG$comparison)){
+  subset_comparison <- subset(significant_DEG, significant_DEG$comparison == i)
+  comparison_name <- unique(subset_comparison$comparison_name)
+  list_DEG_comparisons[[paste0(i,"_",comparison_name)]] <- subset_comparison
+  rm(subset_comparison,comparison_name)
+}
+```
+
+## CURATE FPKM DATA
+```{r curate FPKM data}
+# add means for all conditions
+data_fpkm <- data_fpkm %>%
+  mutate(
+    mean_PBS  = rowMeans(dplyr::select(., starts_with("PBS"))),
+    mean_LPS = rowMeans(dplyr::select(., starts_with("LPS"))),
+    mean_ODN  = rowMeans(dplyr::select(., starts_with("ODN"))),
+    mean_PIC = rowMeans(dplyr::select(., starts_with("PIC")))
+  )
+
+# rename column gene to gene_id column
+data_fpkm <- data_fpkm %>%
+  dplyr::rename(gene_id = gene)
+```
+
+## LOAD ISG DATA
+```{r load ISG data}
+# import ISG list from this study, generated in XR189_ISG_analyses
+ISG_list  <- read.delim("../../XR249_TL396_iv_IFN-a_brain_RNAseq/XR249_RNAseq_analyses_AL/XR249_ISG_extraction/output/XR249_ISG_list_brain.tsv")
+
+# add a TRUE column for all ISGs
+ISG_list$ISG = T
+```
+
+## FPKM FILTER
+```{r FPKM filter}
+# FPKM values only for filtering
+fpkm_only <- data_fpkm %>%
+  dplyr::select(!contains(c("mean")))
+
+# calculate average FPKM level across all samples and define FPKM cutoff
+fpkm_only <- fpkm_only %>%
+  mutate(average_fpkm = rowSums(fpkm_only[2:length(fpkm_only)]/(length(fpkm_only)-1)))
+
+FPKM_cutoff <- 1
+
+fpkm_only %>%
+  ggplot(aes(x=average_fpkm)) +
+    geom_density(fill="#8a4655", color="#e9ecef", alpha=0.8) +
+    scale_x_continuous(trans='log10') +
+    ggtitle("Average FPKM before cutoff") +
+    geom_vline(xintercept = FPKM_cutoff) +
+    theme_bw()
+
+# filter according to FPKM cutoff
+fpkm_only <- fpkm_only %>%
+  filter(average_fpkm > FPKM_cutoff)
+
+fpkm_only %>%
+  ggplot(aes(x=average_fpkm)) +
+  geom_density(fill="#8a4655", color="#e9ecef", alpha=0.8) +
+  scale_x_continuous(trans='log10') +
+  ggtitle("Average FPKM after cutoff") +
+  geom_vline(xintercept = FPKM_cutoff) +
+  theme_bw()
+
+# drop average FPKM column
+fpkm_only <- fpkm_only %>%
+  dplyr::select(!average_fpkm)
+
+# loop over comparisons of interest
+# 1) cluster genes
+# 2) plot heatmaps
+# 3) add cluster info to gene list
+
+DEG_comparisons_cluster_list <- list()
+DEG_comparisons_cluster_DF <- data.frame()
+
+for(i in 1:length(list_DEG_comparisons)){
+# select condition of interest
+conditionOI <- list_DEG_comparisons[[i]]
+
+# extract DEG from condition of interest
+genesOI <- data.frame(gene_id = conditionOI$gene_id)
+
+# get FPKM for DEG of interest
+fpkmOI <- left_join(genesOI,fpkm_only)
+fpkmOI <- na.omit(fpkmOI)
+row.names(fpkmOI) <- fpkmOI$gene_id
+fpkmOI$gene_id <- NULL
+
+#--------------------------------------------------------------------
+# PLOT HEATMAP with ROW Z SCORES
+#--------------------------------------------------------------------
+# define formula to calculate row Z score
+cal_z_score <- function(x){
+  (x - mean(x)) / sd(x)
+}
+
+# calculate row Z score for FPKMs for each row (gene) of interest
+fpkmOI_norm <- t(apply(fpkmOI, 1, cal_z_score))
+
+# annotate sample columns
+my_sample_col <- data.frame(sample = c(rep("PBS",4),
+                                       rep("LPS",4),
+                                       rep("ODN",4),
+                                       rep("PIC",4)),
+                            condition = c(rep("control",4),
+                                          rep("treated",12)))
+
+row.names(my_sample_col) <- colnames(fpkmOI)
+
+# calculate dendrogram
+hc <- hclust(dist(fpkmOI_norm), method = "complete")
+#as.dendrogram(hc) %>%  #no need to print dendrogram
+#  plot(horiz = T)
+
+# obtain gene names as per dendrogram
+#genes_order <- rev(row.names(fpkmOI_norm)[hc$order]) #no need to print gene names
+
+# add cluster information to heatmap
+numberofclusters = 6
+my_gene_col <- cutree(hc, k = numberofclusters)
+my_gene_col <- data.frame(cluster = ifelse(test = my_gene_col == 1, yes = "1",
+                                           ifelse(test = my_gene_col == 2, yes = "2",
+                                                  ifelse(test = my_gene_col == 3, yes = "3",
+                                                         ifelse(test = my_gene_col == 4, yes = "4",
+                                                                ifelse(test = my_gene_col == 5, yes = "5", no = "6"))))))
+
+# merge ISG_list heatmap row/gene names to add ISG info
+my_gene_col$gene_id <- rownames(my_gene_col)
+my_gene_col <- my_gene_col %>%
+  left_join(ISG_list) %>%
+  replace(is.na(.), FALSE)
+my_gene_col$ISG <-as.integer(my_gene_col$ISG)
+rownames(my_gene_col) <- my_gene_col$gene_id
+my_gene_col$gene_id <- NULL
+
+pheatmap(fpkmOI_norm, annotation_col = my_sample_col, annotation_row = my_gene_col, fontsize_row = 2,
+         show_rownames = T, main = paste0(i,":",as.character(data_summary[i,2])),
+         #color = colorRampPalette(c("midnightblue", "ivory", "firebrick3"))(50),
+         cutree_rows = numberofclusters,
+         filename = paste0("output/clustering/",i,"_",as.character(data_summary[i,2]),".pdf"))
+
+# add cluster and ISG information to DEG list
+my_gene_col$gene_id <- rownames(my_gene_col) 
+conditionOI_cluster <- conditionOI %>%
+  left_join(my_gene_col) %>%
+  arrange(cluster) %>%
+  na.omit()
+DEG_comparisons_cluster_list[[paste0(i,"_",as.character(data_summary[i,2]))]] <- conditionOI_cluster
+DEG_comparisons_cluster_DF <- rbind(DEG_comparisons_cluster_DF,conditionOI_cluster)
+
+write_tsv(conditionOI_cluster, paste0("output/clustering/",i,"_",as.character(data_summary[i,2]),"_cluster.tsv"))
+
+}
+```
+
+## CLUSTER GENES SIGNIFICANT IN AT LEAST ONE CONDITION
+```{r cluster genes significant in at least one condition}
+# get all significant DEG for  comparisons
+sig_DEG <- significant_DEG %>%
+  group_by(comparison_name)
+
+# reduce to unique significant DEG for comparisons
+unique_sig_DEG <- data.frame(gene_id = unique(sig_DEG$gene_id))
+
+# get FPKM for DEG of interest
+fpkmOI <- left_join(unique_sig_DEG,fpkm_only)
+fpkmOI <- na.omit(fpkmOI)
+row.names(fpkmOI) <- fpkmOI$gene_id
+fpkmOI$gene_id <- NULL
+
+# define formula to calculate row Z score
+cal_z_score <- function(x){
+  (x - mean(x)) / sd(x)
+}
+
+# calculate row Z score for FPKMs for each row (gene) of interest
+fpkmOI_norm <- t(apply(fpkmOI, 1, cal_z_score))
+
+# annotate sample columns
+my_sample_col <- data.frame(sample = c(rep("PBS",4),
+                                       rep("LPS",4),
+                                       rep("ODN",4),
+                                       rep("PIC",4)),
+                            condition = c(rep("control",4),
+                                          rep("treated",12)))
+
+row.names(my_sample_col) <- colnames(fpkmOI)
+
+# calculate dendrogram
+hc <- hclust(dist(fpkmOI_norm), method = "complete")
+
+# add cluster information to heatmap
+numberofclusters = 6
+my_gene_col <-cutree(hc, k = numberofclusters)
+my_gene_col <- data.frame(cluster = ifelse(test = my_gene_col == 1, yes = "1",
+                                           ifelse(test = my_gene_col == 2, yes = "2",
+                                                  ifelse(test = my_gene_col == 3, yes = "3",
+                                                         ifelse(test = my_gene_col == 4, yes = "4",
+                                                                ifelse(test = my_gene_col == 5, yes = "5", no = "6"))))))
+
+
+# merge ISG_list heatmap row/gene names to add ISG info
+my_gene_col$gene_id <- rownames(my_gene_col)
+my_gene_col <- my_gene_col %>%
+  left_join(ISG_list) %>%
+  replace(is.na(.), FALSE)
+my_gene_col$ISG <-as.integer(my_gene_col$ISG)
+rownames(my_gene_col) <- my_gene_col$gene_id
+my_gene_col$gene_id <- NULL
+
+pheatmap::pheatmap(fpkmOI_norm, annotation_col = my_sample_col, annotation_row = my_gene_col, 
+           show_rownames = F, main = "significant in at least one comparison",
+           #color = colorRampPalette(c("midnightblue", "ivory", "firebrick3"))(50),
+           cutree_rows = numberofclusters)
+
+# add cluster and ISG information to DEG list
+my_gene_col$gene_id <- rownames(my_gene_col) 
+sig_DEG_cluster <- sig_DEG %>%
+  left_join(my_gene_col) %>%
+  arrange(cluster) %>%
+  na.omit()
+
+write_tsv(sig_DEG_cluster, "output/clustering/all_DEG_cluster.tsv")
+```
+
+## GENERATE UPSET PLOTS
+```{r generate upset plots}
+# filter for conditions of interest
+conditionsOI <- c("PBS")
+deg_list <- DEG_comparisons_cluster_list[str_detect(names(list_DEG_comparisons), conditionsOI)]
+
+# Extract gene_id vectors
+gene_sets <- map(deg_list, ~ .x$gene_id)
+
+# Build long to wide presence/absence matrix
+df_wide <- imap_dfr(
+  gene_sets,
+  ~ tibble(gene_id = .x, set = .y)
+) %>%
+  mutate(value = 1) %>%
+  pivot_wider(
+    names_from = set,
+    values_from = value,
+    values_fill = 0
+  )
+
+# Plot Upset Plots
+p <- ComplexUpset::upset(
+  df_wide,
+  intersect = names(df_wide)[-1],
+  base_annotations = list(
+    'Intersection size' = intersection_size(counts = TRUE)
+  ),
+  themes = list(
+    default = theme_minimal(),
+    annotation = theme_minimal(),
+    intersection_matrix = theme_minimal(),
+    intersections = theme_minimal(),
+    overall_sizes = theme_minimal()
+  )
+) +
+  ggtitle("Shared DEGs Across Conditions") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+print(p)
+```
+
+
+## APPENDIX
+```{r appendix}
+# which R packages and versions?
+if ("devtools" %in% installed.packages()) devtools::session_info()
+```
+
